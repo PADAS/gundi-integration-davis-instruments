@@ -334,3 +334,21 @@ async def test_a_rate_limit_on_the_station_list_stops_cleanly(gundi, mocker):
     pull.assert_not_awaited()
     assert gundi.activity.await_args.kwargs["title"] == (
         "Readings weren't fetched because the WeatherLink key reached its limit of calls.")
+
+
+def test_a_wind_direction_code_that_is_not_a_number_is_left_out():
+    record = {"ts": 1795446600, "temp_out": 68.0, "wind_dir_of_prevail": "N/A", "wind_dir_of_hi": None}
+    readings = handlers.merge_records_by_time(station_data((4, [record])))
+
+    assert handlers.weather_values(readings[1795446600]) == {"temperature_c": 20.0}
+
+
+@pytest.mark.asyncio
+async def test_a_bad_wind_direction_code_does_not_stop_the_pull(gundi, mocker):
+    record = {"ts": 1795446600, "temp_out": 68.0, "wind_dir_of_prevail": "N/A", "wind_dir_of_hi": "N/A"}
+    mocker.patch.object(handlers.client, "get_historic", new=AsyncMock(return_value=station_data((7, [record]))))
+
+    sent = await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=1)
+
+    assert sent == 1
+    assert sent_observations(gundi)[0]["additional"] == {"temperature_c": 20.0}

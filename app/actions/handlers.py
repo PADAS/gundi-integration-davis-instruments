@@ -81,8 +81,13 @@ def merge_records_by_time(station_data: client.StationData) -> Dict[int, dict]:
             values = {key: value for key, value in record.items() if key not in SKIPPED_FIELDS and value is not None}
             if sensor.data_structure_type in WIND_DIRECTION_CODE_DATA_STRUCTURE_TYPES:
                 for key in ("wind_dir_of_prevail", "wind_dir_of_hi"):
-                    if key in values:
+                    if key not in values:
+                        continue
+                    if is_number(values[key]):
                         values[key] = values[key] * 22.5
+                    else:
+                        # Not a direction code (for example "N/A"): left out.
+                        del values[key]
             readings[ts].update(values)
     return {ts: values for ts, values in readings.items() if values}
 
