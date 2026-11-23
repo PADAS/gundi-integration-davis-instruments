@@ -247,14 +247,15 @@ async def pull_current(integration, station: client.Station, api_key: str, api_s
         base_url=weatherlink_base_url(integration),
     )
     readings = merge_records_by_time(station_data)
-    if cursor:
-        cutoff = int(cursor.timestamp())
-        readings = {ts: values for ts, values in readings.items() if ts > cutoff}
     if not readings:
         return 0
     # Sensors report at slightly different times; send one reading stamped
-    # with the newest time, holding every sensor's latest values.
+    # with the newest time, holding every sensor's latest values (older ones
+    # included, such as a barometer that reports less often). The newest time
+    # alone decides whether this reading was already sent.
     latest_ts = max(readings)
+    if cursor and latest_ts <= int(cursor.timestamp()):
+        return 0
     merged = {}
     for ts in sorted(readings):
         merged.update(readings[ts])

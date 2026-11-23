@@ -21,6 +21,21 @@ BAROMETER_RECORD = {"ts": 1795446600, "bar_sea_level": 30.159, "bar_absolute": 2
 HEALTH_RECORD = {"ts": 1795446600, "battery_voltage": 4016, "ip_v4_address": "192.168.1.190"}
 
 
+# Shortly after the fixture readings, so tests don't depend on the real clock.
+FROZEN_NOW = datetime(2026, 11, 23, 15, 30, tzinfo=timezone.utc)
+
+
+class FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW if tz else FROZEN_NOW.replace(tzinfo=None)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(mocker):
+    mocker.patch.object(handlers, "datetime", FrozenDatetime)
+
+
 def station_data(*sensors):
     return client.StationData(station_id=STATION.station_id, sensors=[
         client.SensorData(sensor_type=0, data_structure_type=dst, data=records) for dst, records in sensors
@@ -148,7 +163,9 @@ async def test_pull_starts_from_the_saved_cursor(gundi, mocker):
 
     await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=24)
 
+    assert get_historic.await_count == 1
     assert get_historic.await_args.kwargs["start"] == datetime.fromtimestamp(1795446600, tz=timezone.utc)
+    assert get_historic.await_args.kwargs["end"] == FROZEN_NOW
 
 
 @pytest.mark.asyncio
@@ -222,8 +239,7 @@ async def test_a_long_outage_reaches_back_at_most_seven_days(gundi, mocker):
     await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=24)
 
     assert get_historic.await_count == 7
-    first_start = get_historic.await_args_list[0].kwargs["start"]
-    assert datetime.now(timezone.utc) - first_start <= timedelta(days=7, seconds=5)
+    assert get_historic.await_args_list[0].kwargs["start"] == FROZEN_NOW - timedelta(days=7)
 
 
 @pytest.mark.asyncio
@@ -283,3 +299,18 @@ def test_older_consoles_are_read_with_their_own_names_and_direction_codes():
         "humidity_pct": 40, "wind_speed_kmh": 16.1, "wind_gust_kmh": 32.2, "wind_direction_deg": 90.0,
         "heat_index_c": 20.0, "dew_point_c": 10.0, "pressure_hpa": 1015.9,
     }
+
+
+@pytest.mark.asyncio
+async def test_current_conditions_keep_a_sensor_older_than_the_cursor(gundi, mocker):
+    gundi.state[("pull_observations", "167888")] = {"last_ts": 1795446600}  # 15:10
+    gundi.state[("pull_observations", "no-historic-167888")] = 1
+    mocker.patch.object(handlers.client, "get_current", new=AsyncMock(return_value=station_data(
+        (23, [{"ts": 1795446900, "temp": 68.0}]),  # 15:15
+        (19, [{"ts": 1795446300, "bar_sea_level": 30.0}]),  # 15:05, before the cursor
+    )))
+
+    sent = await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=1)
+
+    assert sent == 1
+    assert sent_observations(gundi)[0]["additional"] == {"temperature_c": 20.0, "pressure_hpa": 1015.9}
