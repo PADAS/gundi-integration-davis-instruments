@@ -314,3 +314,23 @@ async def test_current_conditions_keep_a_sensor_older_than_the_cursor(gundi, moc
 
     assert sent == 1
     assert sent_observations(gundi)[0]["additional"] == {"temperature_c": 20.0, "pressure_hpa": 1015.9}
+
+
+def test_a_value_that_is_not_a_number_is_left_out():
+    values = {"temp_last": "N/A", "temp": 68.0, "hum_last": None, "hum": True, "bar_sea_level": float("nan"), "rainfall_mm": 0}
+
+    assert handlers.weather_values(values) == {"temperature_c": 20.0, "rainfall_mm": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_on_the_station_list_stops_cleanly(gundi, mocker):
+    mocker.patch.object(handlers.client, "get_stations", new=AsyncMock(
+        side_effect=client.WeatherLinkRateLimitError("slow down", 429)))
+    pull = mocker.patch.object(handlers, "pull_station", new=AsyncMock())
+
+    result = await handlers.action_pull_observations(integration(), action_config=PullObservationsConfig())
+
+    assert result == {"stations": 0, "stations_failed": [], "observations_sent": 0}
+    pull.assert_not_awaited()
+    assert gundi.activity.await_args.kwargs["title"] == (
+        "Readings weren't fetched because the WeatherLink key reached its limit of calls.")

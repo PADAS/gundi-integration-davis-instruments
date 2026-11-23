@@ -1,4 +1,5 @@
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
@@ -127,10 +128,16 @@ def weather_values(values: dict) -> dict:
     """The readings conservation teams use, with clear names in metric units."""
     result = {}
     for name, convert, davis_fields in WEATHER_FIELDS:
-        value = next((values[f] for f in davis_fields if values.get(f) is not None), None)
+        # A value that isn't a number (for example "N/A") is left out, so one
+        # bad field doesn't lose the rest of the reading.
+        value = next((values[f] for f in davis_fields if is_number(values.get(f))), None)
         if value is not None:
             result[name] = convert(value)
     return result
+
+
+def is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def transform(station: client.Station, ts: int, values: dict) -> dict:
@@ -289,9 +296,18 @@ async def action_pull_observations(integration, action_config: PullObservationsC
     api_key = auth_config.api_key.get_secret_value()
     api_secret = auth_config.api_secret.get_secret_value()
 
-    stations = await client.get_stations(
-        api_key=api_key, api_secret=api_secret, base_url=weatherlink_base_url(integration)
-    )
+    try:
+        stations = await client.get_stations(
+            api_key=api_key, api_secret=api_secret, base_url=weatherlink_base_url(integration)
+        )
+    except client.WeatherLinkRateLimitError as e:
+        logger.warning(f"WeatherLink rate limit reached listing stations: {e!r}")
+        await log_station_warning(
+            integration.id,
+            title="Readings weren't fetched because the WeatherLink key reached its limit of calls.",
+            data={"status_code": e.status_code, "message": str(e)},
+        )
+        return {"stations": 0, "stations_failed": [], "observations_sent": 0}
 
     observations_sent = 0
     stations_pulled = 0
