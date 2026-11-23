@@ -38,6 +38,10 @@ class WeatherLinkAuthError(WeatherLinkError):
     """WeatherLink didn't accept the API key and secret."""
 
 
+class WeatherLinkConnectionError(WeatherLinkError):
+    """WeatherLink couldn't be reached or didn't answer in time."""
+
+
 class WeatherLinkPermissionError(WeatherLinkError):
     """The key can't read this data, for example historic data on a Basic plan."""
 
@@ -87,9 +91,9 @@ def _raise_for_status(response: httpx.Response):
         return
     try:
         body = response.json()
-        message = body.get("message") or response.text
     except ValueError:
-        message = response.text
+        body = None
+    message = (body.get("message") if isinstance(body, dict) else None) or response.text
     message = (message or "").strip()[:500]
     status = response.status_code
     if status == 401:
@@ -103,20 +107,38 @@ def _raise_for_status(response: httpx.Response):
 
 async def _get(base_url: str, path: str, api_key: str, api_secret: str, params: Optional[dict] = None) -> dict:
     query = {"api-key": api_key, **(params or {})}
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        response = await client.get(
-            f"{base_url.rstrip('/')}/{path.lstrip('/')}",
-            params=query,
-            headers={"X-Api-Secret": api_secret},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            response = await client.get(
+                f"{base_url.rstrip('/')}/{path.lstrip('/')}",
+                params=query,
+                headers={"X-Api-Secret": api_secret},
+            )
+    except httpx.TransportError as e:
+        # The message names the error type only: httpx's text can quote the
+        # request URL, which carries the API key.
+        raise WeatherLinkConnectionError(f"WeatherLink didn't answer ({type(e).__name__})") from e
     _raise_for_status(response)
-    return response.json()
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise WeatherLinkError("WeatherLink answered with something that isn't JSON", response.status_code) from e
+    if not isinstance(body, dict):
+        raise WeatherLinkError("WeatherLink answered with an unexpected JSON shape", response.status_code)
+    return body
+
+
+def _parse(model, data):
+    try:
+        return model.parse_obj(data)
+    except pydantic.ValidationError as e:
+        raise WeatherLinkError(f"WeatherLink answered with an unexpected {model.__name__}: {e}") from e
 
 
 async def get_stations(api_key: str, api_secret: str, base_url: str = WEATHERLINK_BASE_URL) -> List[Station]:
     """Every station the key can see, owned or shared."""
     body = await _get(base_url, "/stations", api_key, api_secret)
-    return [Station.parse_obj(item) for item in body.get("stations", [])]
+    return [_parse(Station, item) for item in body.get("stations") or []]
 
 
 async def get_current(
@@ -124,7 +146,7 @@ async def get_current(
 ) -> StationData:
     """The latest reading of each sensor at the station."""
     body = await _get(base_url, f"/current/{station_id}", api_key, api_secret)
-    return StationData.parse_obj(body)
+    return _parse(StationData, body)
 
 
 async def get_historic(
@@ -150,4 +172,4 @@ async def get_historic(
         api_secret,
         params={"start-timestamp": start_ts, "end-timestamp": end_ts},
     )
-    return StationData.parse_obj(body)
+    return _parse(StationData, body)

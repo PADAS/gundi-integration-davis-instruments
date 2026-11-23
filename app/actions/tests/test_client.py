@@ -79,3 +79,54 @@ async def test_historic_refuses_more_than_one_day():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with pytest.raises(ValueError):
         await client.get_historic(1, start, start + timedelta(days=1, seconds=1), api_key="k", api_secret="s")
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_becomes_a_connection_error_without_the_key(monkeypatch):
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        raise httpx.ReadTimeout("timed out reading https://x/?api-key=key", request=request)
+
+    monkeypatch.setattr(
+        client.httpx, "AsyncClient",
+        lambda *a, **kw: real_client(*a, transport=httpx.MockTransport(handler), **kw),
+    )
+
+    with pytest.raises(client.WeatherLinkConnectionError) as raised:
+        await client.get_stations(api_key="key", api_secret="secret")
+
+    assert "key" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_an_error_body_that_is_not_an_object_still_raises_a_weatherlink_error(weatherlink):
+    responses, _ = weatherlink
+    responses["/v2/stations"] = (502, ["bad gateway"])
+
+    with pytest.raises(client.WeatherLinkError) as raised:
+        await client.get_stations(api_key="key", api_secret="secret")
+
+    assert raised.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_a_success_that_is_not_json_raises_a_weatherlink_error(monkeypatch):
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx, "AsyncClient",
+        lambda *a, **kw: real_client(
+            *a, transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html>maintenance</html>")), **kw),
+    )
+
+    with pytest.raises(client.WeatherLinkError):
+        await client.get_current(station_id=1, api_key="key", api_secret="secret")
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_shape_raises_a_weatherlink_error(weatherlink):
+    responses, _ = weatherlink
+    responses["/v2/stations"] = (200, {"stations": [{"station_name": "no id"}]})
+
+    with pytest.raises(client.WeatherLinkError):
+        await client.get_stations(api_key="key", api_secret="secret")

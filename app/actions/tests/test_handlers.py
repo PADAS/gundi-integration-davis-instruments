@@ -52,6 +52,14 @@ def gundi(mocker):
 
     mocker.patch.object(handlers.state_manager, "get_state", side_effect=get_state)
     mocker.patch.object(handlers.state_manager, "set_state", side_effect=set_state_by_keyword)
+
+    async def set_if_absent(integration_id, action_id, *, ttl_seconds, source_id="no-source"):
+        if (action_id, source_id) in state:
+            return False
+        state[(action_id, source_id)] = 1
+        return True
+
+    mocker.patch.object(handlers.state_manager, "set_if_absent", side_effect=set_if_absent)
     sent = mocker.patch.object(handlers, "send_observations_to_gundi", new=AsyncMock(return_value={}))
     activity = mocker.patch.object(handlers, "log_action_activity", new=AsyncMock())
     mocker.patch("app.services.activity_logger.publish_event", new=AsyncMock())
@@ -145,7 +153,7 @@ async def test_pull_starts_from_the_saved_cursor(gundi, mocker):
 
 @pytest.mark.asyncio
 async def test_basic_plan_stations_send_the_latest_reading(gundi, mocker):
-    mocker.patch.object(handlers.client, "get_historic", new=AsyncMock(
+    get_historic = mocker.patch.object(handlers.client, "get_historic", new=AsyncMock(
         side_effect=client.WeatherLinkPermissionError("no access", 403)))
     mocker.patch.object(handlers.client, "get_current", new=AsyncMock(return_value=station_data(
         (23, [{"ts": 1795446600, "temp": 68.0}]),
@@ -159,10 +167,11 @@ async def test_basic_plan_stations_send_the_latest_reading(gundi, mocker):
     assert observation["recorded_at"] == "2026-11-23T15:10:00+00:00"
     assert observation["additional"] == {"temperature_c": 20.0, "pressure_hpa": 1015.9}
 
-    # The same reading isn't sent twice.
+    # The same reading isn't sent twice, and historic isn't asked again.
     gundi.sent.reset_mock()
     assert await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=1) == 0
     gundi.sent.assert_not_awaited()
+    assert get_historic.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -196,9 +205,81 @@ async def test_one_failing_station_does_not_stop_the_others(gundi, mocker):
 
     result = await handlers.action_pull_observations(integration(), action_config=PullObservationsConfig())
 
-    assert result == {"stations": 3, "stations_failed": ["Naboisho HQ"], "observations_sent": 5}
+    assert result == {"stations": 2, "stations_failed": ["Naboisho HQ"], "observations_sent": 5}
     titles = [call.kwargs["title"] for call in gundi.activity.await_args_list]
     assert titles == [
         "Readings from station Naboisho HQ weren't fetched because WeatherLink answered with an error.",
         "Readings from station Workshop weren't sent because WeatherLink has no location for it.",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_long_outage_reaches_back_at_most_seven_days(gundi, mocker):
+    gundi.state[("pull_observations", "167888")] = {"last_ts": 1700000000}  # months ago
+    get_historic = mocker.patch.object(
+        handlers.client, "get_historic", new=AsyncMock(return_value=station_data()))
+
+    await handlers.pull_station(integration(), STATION, "key", "secret", lookback_hours=24)
+
+    assert get_historic.await_count == 7
+    first_start = get_historic.await_args_list[0].kwargs["start"]
+    assert datetime.now(timezone.utc) - first_start <= timedelta(days=7, seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_a_network_error_or_lost_log_entry_does_not_stop_the_other_stations(gundi, mocker):
+    other = client.Station(station_id=2, station_name="Airstrip", latitude=-1.5, longitude=35.4)
+    mocker.patch.object(handlers.client, "get_stations", new=AsyncMock(return_value=[STATION, other]))
+    mocker.patch.object(handlers, "pull_station", new=AsyncMock(
+        side_effect=[client.WeatherLinkConnectionError("WeatherLink didn't answer (ReadTimeout)"), 4]))
+    gundi.activity.side_effect = RuntimeError("pubsub down")
+
+    result = await handlers.action_pull_observations(integration(), action_config=PullObservationsConfig())
+
+    assert result == {"stations": 2, "stations_failed": ["Naboisho HQ"], "observations_sent": 4}
+    assert gundi.activity.await_args.kwargs["title"] == (
+        "Readings from station Naboisho HQ weren't fetched because WeatherLink didn't answer.")
+
+
+def test_air_quality_sensors_do_not_replace_outdoor_weather():
+    airlink = {"ts": 1795446600, "temp_hi": 90.0, "temp_lo": 80.0, "hum_last": 20.0}
+    readings = handlers.merge_records_by_time(station_data((24, [ARCHIVE_RECORD]), (17, [airlink])))
+
+    values = handlers.weather_values(readings[1795446600])
+
+    assert values["temperature_max_c"] == 24.2
+    assert values["humidity_pct"] == 53.7
+
+
+def test_no_window_shorter_than_a_second():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert list(handlers.time_windows(start, start + timedelta(milliseconds=400))) == []
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_stops_the_run(gundi, mocker):
+    others = [client.Station(station_id=i, station_name=f"S{i}", latitude=-1.5, longitude=35.4) for i in (2, 3)]
+    mocker.patch.object(handlers.client, "get_stations", new=AsyncMock(return_value=[STATION, *others]))
+    pull = mocker.patch.object(handlers, "pull_station", new=AsyncMock(
+        side_effect=[client.WeatherLinkRateLimitError("slow down", 429), 1, 1]))
+
+    result = await handlers.action_pull_observations(integration(), action_config=PullObservationsConfig())
+
+    assert pull.await_count == 1
+    assert result["stations_failed"] == ["Naboisho HQ"]
+    assert gundi.activity.await_count == 1
+
+
+def test_older_consoles_are_read_with_their_own_names_and_direction_codes():
+    vantage_archive = {
+        "ts": 1795446600, "temp_out": 68.0, "temp_out_hi": 70.0, "temp_out_lo": 66.0, "hum_out": 40,
+        "dew_point_out": 50.0, "heat_index_out": 68.0, "bar": 30.0, "rainfall_mm": 0.2,
+        "wind_speed_avg": 10, "wind_speed_hi": 20, "wind_dir_of_prevail": 4, "temp_in": 75.0,
+    }
+    readings = handlers.merge_records_by_time(station_data((4, [vantage_archive])))
+
+    assert handlers.weather_values(readings[1795446600]) == {
+        "rainfall_mm": 0.2, "temperature_c": 20.0, "temperature_max_c": 21.1, "temperature_min_c": 18.9,
+        "humidity_pct": 40, "wind_speed_kmh": 16.1, "wind_gust_kmh": 32.2, "wind_direction_deg": 90.0,
+        "heat_index_c": 20.0, "dew_point_c": 10.0, "pressure_hpa": 1015.9,
+    }
