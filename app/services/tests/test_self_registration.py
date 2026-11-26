@@ -3,7 +3,7 @@ import types
 
 import pytest
 from fastapi.testclient import TestClient
-from app.actions import action_title, discover_actions, PullActionConfiguration
+from app.actions import action_description, action_title, discover_actions, PullActionConfiguration
 from app.main import app
 from app.services.self_registration import register_integration_in_gundi
 from app.services.action_scheduler import crontab_schedule, CrontabSchedule
@@ -910,3 +910,45 @@ def test_register_cli_passes_the_description_through(mocker):
     assert kwargs["type_slug"] == "x_tracker"
     assert kwargs["type_name"] is None
     assert kwargs["type_description"] == "X Tracker collars, via the X Tracker cloud API"
+
+
+@pytest.mark.asyncio
+async def test_register_integration_with_action_description(
+    mocker,
+    mock_gundi_client_v2,
+    mock_action_handlers,
+    mock_get_webhook_handler_for_fixed_json_payload,
+):
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mock_action_handlers["pull_observations"][0].action_description = "Fetches collar positions every hour."
+    mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
+    mocker.patch(
+        "app.services.self_registration.get_webhook_handler",
+        mock_get_webhook_handler_for_fixed_json_payload,
+    )
+    await register_integration_in_gundi(gundi_client=mock_gundi_client_v2)
+    data = mock_gundi_client_v2.register_integration_type.call_args.args[0]
+    pull_action = next(a for a in data["actions"] if a["value"] == "pull_observations")
+    assert pull_action["description"] == "Fetches collar positions every hour."
+    # Actions without a custom description keep the default one
+    push_action = next(a for a in data["actions"] if a["value"] == "push_observations")
+    assert push_action["description"] == "X Tracker Push Observations action"
+
+
+def test_action_description_decorator_stacks_with_action_title():
+
+    @action_title("Fetch Collar Positions")
+    @action_description("Fetches collar positions every hour.")
+    async def action_pull_observations(integration, action_config):
+        return {"observations_extracted": 10}
+
+    assert action_pull_observations.action_title == "Fetch Collar Positions"
+    assert action_pull_observations.action_description == "Fetches collar positions every hour."
+
+
+def test_the_action_description_decorator_is_not_registered_as_an_action(mocker):
+    module = type(__import__("sys"))("fake_handlers")
+    module.action_description = action_description
+    module.action_title = action_title
+    mocker.patch("app.actions.core.importlib.import_module", return_value=module)
+    assert discover_actions(module_name="fake_handlers", prefix="action_") == {}

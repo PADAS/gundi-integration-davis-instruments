@@ -13,6 +13,7 @@ from app.actions.configurations import (
     PullObservationsConfig,
     get_auth_config,
 )
+from app.actions.core import action_description, action_title
 from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.gundi import send_observations_to_gundi
@@ -276,6 +277,10 @@ async def pull_current(integration, station: client.Station, api_key: str, api_s
     return sent
 
 
+@action_title("Authentication")
+@action_description(
+    "Checks the WeatherLink API Key and Secret and lists the weather stations they can read."
+)
 @activity_logger()
 async def action_auth(integration, action_config: AuthenticateConfig):
     logger.info(f"Executing 'auth' action with integration ID {integration.id}...")
@@ -293,6 +298,11 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     }
 
 
+@action_title("Fetch Weather Readings from Davis Instruments")
+@action_description(
+    "Every 5 minutes, fetches new readings from each WeatherLink station and sends them to Gundi: "
+    "temperature, humidity, rainfall, wind, dew point, heat index and pressure, in metric units."
+)
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_pull_observations(integration, action_config: PullObservationsConfig):
