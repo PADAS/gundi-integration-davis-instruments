@@ -26,6 +26,12 @@ from .retry_policies import is_transient_gundi_error
 logger = logging.getLogger(__name__)
 
 
+def action_description_of(func):
+    """The description set with @action_description, if any."""
+    description = getattr(func, "action_description", None)
+    return description if isinstance(description, str) else None
+
+
 async def register_integration_in_gundi(
     gundi_client, type_slug=None, type_name=None, service_url=None, action_schedules=None, type_description=None
 ):
@@ -84,7 +90,7 @@ async def register_integration_in_gundi(
             "type": action_type,
             "name": action_name,
             "value": action_id,
-            "description": f"{integration_type_name} {action_name} action",
+            "description": action_description_of(func) or f"{integration_type_name} {action_name} action",
             "schema": action_schema,
             "ui_schema": action_ui_schema,
         }

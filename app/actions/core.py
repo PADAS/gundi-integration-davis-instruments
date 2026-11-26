@@ -49,6 +49,15 @@ def action_title(title: str):
     return decorator
 
 
+def action_description(description: str):
+    """Set the description shown for the action in the Gundi portal,
+    instead of the default built from the integration and action names."""
+    def decorator(func):
+        setattr(func, "action_description", description)
+        return func
+    return decorator
+
+
 class PushActionConfiguration(ActionConfiguration):
     pass
 
@@ -108,8 +117,8 @@ def discover_actions(module_name, prefix):
     # Iterate through the members and filter functions by prefix
     for name, func in all_members:
         if name.startswith(prefix) and inspect.isfunction(func):
-            if func is action_title:
-                continue  # The decorator itself, often imported alongside handlers
+            if func is action_title or func is action_description:
+                continue  # The decorators themselves, often imported alongside handlers
             signature = inspect.signature(func)
             key = name[len(prefix):]  # Remove prefix
             if "action_config" not in signature.parameters:
